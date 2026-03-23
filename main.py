@@ -5,10 +5,11 @@ import sqlite3
 import pandas as pd 
 import time
 import threading
+import os
 
 app = FastAPI()
 connection = sqlite3.connect("weather.db",check_same_thread=False)
-API_KEY = "189e4a7b830306ca87efc15487b61d55"
+API_KEY = os.getenv("API_KEY")
 
 @app.get('/')
 def home():
@@ -157,7 +158,7 @@ def fetch_store_city(city:str):
         except Exception as e:
             print(e)
 
-        time.sleep(3600)
+        time.sleep(60)
 
 @app.on_event("startup")
 def start_background():
