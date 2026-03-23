@@ -2,96 +2,102 @@ from fastapi import FastAPI
 import requests
 from datetime import datetime
 import sqlite3
-import pandas as pd 
+import pandas as pd
 import time
 import threading
 import os
 
 app = FastAPI()
-connection = sqlite3.connect("weather.db",check_same_thread=False)
+
 API_KEY = os.getenv("API_KEY")
 
-@app.get('/')
-def home():
-    return "welcome to Weather api"
+DB_NAME = "weather.db"
 
 
+def get_connection():
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
-def create_table(connection):
+
+def create_table():
+    conn = get_connection()
     query = """
-            CREATE TABLE IF NOT EXISTS users(
+        CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY,
-            city TEXT ,
+            city TEXT,
             temperature FLOAT,
-            humidity int,
+            humidity INT,
             sunrise TEXT,
             description TEXT,
             created_at DATETIME
-            )
-"""
-    try:
-        with connection:
-            connection.execute(query)
-        print("table is created")
-    except Exception as e:
-        print(e)
-create_table(connection)
+        )
+    """
+    with conn:
+        conn.execute(query)
+    conn.close()
 
-@app.get('/weather')
-def get_weather(city:str):
+
+create_table()
+
+
+@app.get("/")
+def home():
+    return {"message": "Weather API is live 🚀"}
+
+
+def fetch_weather(city):
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}&units=metric"
     response = requests.get(url)
     data = response.json()
-    if data["cod"]!=200:
-                return None
 
-    temperature = data['main']['temp']
-    humidity = data['main']['humidity']
-    sunrise = data['sys']['sunrise']
-    sunrise_time = datetime.fromtimestamp(sunrise).strftime('%H:%M:%S')
-    description = data['weather'][0]['description']
+    if data.get("cod") != 200:
+        return None
 
+    return {
+        "temperature": data["main"]["temp"],
+        "humidity": data["main"]["humidity"],
+        "sunrise": datetime.fromtimestamp(data["sys"]["sunrise"]).strftime('%H:%M:%S'),
+        "description": data["weather"][0]["description"]
+    }
+
+
+@app.get("/weather")
+def get_weather(city: str):
+    result = fetch_weather(city)
+
+    if not result:
+        return {"error": "City not found"}
+
+    conn = get_connection()
     now = datetime.now()
 
-    with connection:
-        connection.execute(
+    with conn:
+        conn.execute(
             "INSERT INTO users(city, temperature, humidity, sunrise, description, created_at) VALUES (?,?,?,?,?,?)",
-            (city, temperature, humidity, sunrise, description, now)
+            (
+                city,
+                result["temperature"],
+                result["humidity"],
+                result["sunrise"],
+                result["description"],
+                now,
+            ),
         )
-    
+    conn.close()
 
     return {
         "city": city,
-        "temperature": temperature,
-        "humidity": humidity,
-        "Sunrise" : sunrise_time,
-        "Description" : description
+        **result
     }
 
-@app.get('/weather/history')
+
+@app.get("/weather/history")
 def get_history():
-    cursor = connection.cursor()
+    conn = get_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT * FROM users")
-    rows = cursor.fetchall()  
-    result = []
-    for row in rows:
-        result.append({
-            "id": row[0],
-            "city": row[1],
-            "temperature": row[2],
-            "humidity": row[3],
-            "sunrise": row[4],
-            "description": row[5],
-            "created_at": row[6]
-        })
-
-    return result  
-
-@app.get('/weather/history/{city}')
-def fetch_data(city:str):
-    cursor = connection.cursor()
-    cursor.execute("SELECT * FROM users WHERE city = ?",(city,))
     rows = cursor.fetchall()
+    conn.close()
+
     result = []
     for row in rows:
         result.append({
@@ -106,62 +112,89 @@ def fetch_data(city:str):
 
     return result
 
-@app.get('/weather/stats/{city}')
-def show_stats(city:str):
-    cursor  = connection.cursor()
-    cursor.execute("SELECT temperature, humidity FROM users WHERE city = ?",(city,))
+
+@app.get("/weather/history/{city}")
+def fetch_data(city: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE city = ?", (city,))
     rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "id": row[0],
+            "city": row[1],
+            "temperature": row[2],
+            "humidity": row[3],
+            "sunrise": row[4],
+            "description": row[5],
+            "created_at": row[6]
+        })
+
+    return result
+
+
+@app.get("/weather/stats/{city}")
+def show_stats(city: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT temperature, humidity FROM users WHERE city = ?", (city,))
+    rows = cursor.fetchall()
+    conn.close()
 
     if not rows:
-        return f"no data from {city}"
-    
-    df = pd.DataFrame(rows, columns=["temperature","humidity"])
-    avg_temp = df["temperature"].mean()
-    min_temp = df["temperature"].min() 
-    max_temp = df["temperature"].max()
-    avg_hum = df["humidity"].mean()
+        return {"error": f"No data for {city}"}
+
+    df = pd.DataFrame(rows, columns=["temperature", "humidity"])
 
     return {
-        "city" : city,
-        "Average temperature" : avg_temp,
-        "minimum temperature" : min_temp,
-        "maximum temperature" : max_temp,
-        "average humidity" : avg_hum
-        }
+        "city": city,
+        "avg_temp": df["temperature"].mean(),
+        "min_temp": df["temperature"].min(),
+        "max_temp": df["temperature"].max(),
+        "avg_humidity": df["humidity"].mean()
+    }
 
-def fetch_store_city(city:str):
+
+def fetch_store_city(city: str):
     while True:
         try:
-            url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}&units=metric"
-            response = requests.get(url)
-            data = response.json()
+            result = fetch_weather(city)
 
-            if data["cod"]!=200:
-                return None
+            if not result:
+                print("API error")
+                time.sleep(60)
+                continue
 
-            temperature = data['main']['temp']
-            humidity = data['main']['humidity']
-            sunrise = data['sys']['sunrise']
-            sunrise_time = datetime.fromtimestamp(sunrise).strftime('%H:%M:%S')
-            description = data['weather'][0]['description']
-
+            conn = get_connection()
             now = datetime.now()
 
-            with connection:
-                connection.execute(
+            with conn:
+                conn.execute(
                     "INSERT INTO users(city, temperature, humidity, sunrise, description, created_at) VALUES (?,?,?,?,?,?)",
-                    (city, temperature, humidity, sunrise, description, now)
+                    (
+                        city,
+                        result["temperature"],
+                        result["humidity"],
+                        result["sunrise"],
+                        result["description"],
+                        now,
+                    ),
                 )
-            
-            
-            print(f"data stored for {city} at time {now} ")
+            conn.close()
+
+            print(f"Stored data for {city}")
+
         except Exception as e:
             print(e)
 
-        time.sleep(60)
+        time.sleep(300) 
+
 
 @app.on_event("startup")
 def start_background():
-    thread = threading.Thread(target=fetch_store_city,args=("Delhi",))
+    thread = threading.Thread(target=fetch_store_city, args=("Delhi",))
     thread.daemon = True
     thread.start()
